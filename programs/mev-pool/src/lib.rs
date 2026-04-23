@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
-declare_id!("3sjTba51AmhtEpVYcDU4sh4rpfPm6YiTmVTJaJAjTJjW"); // replace after deploy
+declare_id!("MEVp222222222222222222222222222222222222222"); // v0.2
 
 // ── CONSTANTS (immutable once deployed) ──────────────────────────────────────
 const TREASURY: &str = "A1TRS3i2g62Zf6K4vybsW4JLx8wifqSoThyTQqXNaLDK";
@@ -82,6 +82,7 @@ pub mod mev_pool {
             total_received: 0,
             joined_epoch: Clock::get()?.epoch,
             active: true,
+            last_contribution_epoch: Clock::get()?.epoch,
         };
         pool.member_count += 1;
 
@@ -165,9 +166,20 @@ pub mod mev_pool {
         let burn_fee = operator_fee - treasury_fee;
         let distributable = total - operator_fee;
 
-        // Equal share per active member
-        let share_per_member = distributable / active_members.len() as u64;
-        let remainder = distributable - (share_per_member * active_members.len() as u64);
+        // FIX: Only pay members who have been in pool >= 3 epochs (anti pool-hopping)
+        let current_epoch = Clock::get()?.epoch;
+        let min_epochs: u64 = 3;
+        let eligible_members: Vec<usize> = active_members.iter().copied()
+            .filter(|&i| {
+                let epochs_in_pool = current_epoch.saturating_sub(pool.members[i].joined_epoch);
+                epochs_in_pool >= min_epochs
+            })
+            .collect();
+
+        let share_count = if eligible_members.is_empty() { active_members.len() } else { eligible_members.len() };
+        let use_members = if eligible_members.is_empty() { &active_members } else { &eligible_members };
+        let share_per_member = distributable / share_count as u64;
+        let remainder = distributable - (share_per_member * share_count as u64);
 
         // Pay operator fee to treasury
         system_program::transfer(
@@ -200,8 +212,8 @@ pub mod mev_pool {
         pool.last_distribution_epoch = current_epoch;
         pool.current_epoch_balance = remainder; // carry remainder to next epoch
 
-        // Update member totals
-        for &idx in &active_members {
+        // Update member totals — only eligible members
+        for &idx in use_members {
             pool.members[idx].total_received += share_per_member;
         }
 
@@ -322,10 +334,11 @@ pub struct PoolMember {
     pub total_received: u64,
     pub joined_epoch: u64,
     pub active: bool,
+    pub last_contribution_epoch: u64,  // FIX: track contribution recency
 }
 
 impl PoolMember {
-    pub const LEN: usize = 32 + 32 + 8 + 8 + 8 + 1;
+    pub const LEN: usize = 32 + 32 + 8 + 8 + 8 + 1 + 8;
 }
 
 // ── EVENTS ────────────────────────────────────────────────────────────────────
